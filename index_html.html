@@ -14,6 +14,225 @@ button:hover { transform: scale(1.05); }
 #result { margin-top: 20px; font-size: 18px; color: #333; min-height: 60px; }
 video, img { width: 100%; border-radius: 12px; margin-top: 15px; }
 .shimmer { height: 20px; background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 8px; margin: 8px 0; }
+.progress-bar { height: 10px; background: #e0e0e0; border-radius: 5px; margin: 5px 0; overflow: hidden; }
+.progress { height: 100%; background: linear-gradient(to right, #4facfe, #00f2fe); border-radius: 5px; transition: width 0.3s; }
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+</style>
+</head>
+<body>
+<div class="card">
+<h2>Live Mood Classifier</h2>
+<button id="upload-btn">Upload Image</button>
+<button id="webcam-btn">Use Webcam Live</button>
+<input type="file" id="file-input" accept="image/*" style="display:none;" />
+<img id="image-preview" style="display:none;" />
+<video id="webcam" autoplay playsinline style="display:none;"></video>
+<div id="result">Results will appear here</div>
+</div>
+<script>
+let model, webcamStream, animationId;
+const uploadBtn = document.getElementById('upload-btn');
+const webcamBtn = document.getElementById('webcam-btn');
+const fileInput = document.getElementById('file-input');
+const imagePreview = document.getElementById('image-preview');
+const webcam = document.getElementById('webcam');
+const resultDiv = document.getElementById('result');
+
+// Load the Teachable Machine model
+async function loadModel() {
+    try {
+        resultDiv.innerHTML = 'Loading model...';
+        const modelURL = './model.json';
+        const metadataURL = './metadata.json';
+        model = await tmImage.load(modelURL, metadataURL);
+        resultDiv.textContent = 'Model loaded successfully!';
+    } catch (error) {
+        console.error('Error loading model:', error);
+        resultDiv.textContent = 'Failed to load model. Please check console for errors.';
+    }
+}
+
+uploadBtn.onclick = () => { 
+    stopWebcam(); 
+    fileInput.click(); 
+};
+
+fileInput.onchange = async () => { 
+    const file = fileInput.files[0];
+    if (file) {
+        try {
+            // Clear previous results
+            resultDiv.innerHTML = '<div class="shimmer"></div><div class="shimmer"></div>';
+            
+            // Display the image
+            imagePreview.src = URL.createObjectURL(file);
+            imagePreview.style.display = 'block';
+            webcam.style.display = 'none';
+            
+            // Wait for image to load
+            await new Promise((resolve) => {
+                imagePreview.onload = resolve;
+            });
+            
+            // Predict
+            await predictImage();
+        } catch (error) {
+            console.error('Error processing image:', error);
+            resultDiv.textContent = 'Error processing image. Please try another.';
+        }
+    }
+};
+
+webcamBtn.onclick = async () => { 
+    try {
+        stopWebcam(); 
+        imagePreview.style.display = 'none'; 
+        webcam.style.display = 'block'; 
+        
+        // Get webcam access
+        webcamStream = await navigator.mediaDevices.getUserMedia({ 
+            video: { 
+                facingMode: "user",
+                width: { ideal: 640 },
+                height: { ideal: 480 }
+            } 
+        }); 
+        webcam.srcObject = webcamStream;
+        
+        // Mirror the video
+        webcam.style.transform = "scaleX(-1)";
+        
+        // Wait for video to be ready
+        await new Promise((resolve) => {
+            webcam.onloadedmetadata = resolve;
+        });
+        
+        startLivePrediction(); 
+    } catch (error) {
+        console.error('Error accessing webcam:', error);
+        resultDiv.textContent = 'Could not access webcam. Please check permissions.';
+    }
+};
+
+async function predictImage() { 
+    try {
+        // Create a temporary canvas to ensure consistent image dimensions
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = 224; // Common size for image models
+        tempCanvas.height = 224;
+        const ctx = tempCanvas.getContext('2d');
+        
+        // Draw image to canvas (resizing and centering)
+        const imgRatio = imagePreview.naturalWidth / imagePreview.naturalHeight;
+        const canvasRatio = tempCanvas.width / tempCanvas.height;
+        
+        let drawWidth, drawHeight, offsetX, offsetY;
+        
+        if (imgRatio > canvasRatio) {
+            drawHeight = tempCanvas.height;
+            drawWidth = imagePreview.naturalWidth * (drawHeight / imagePreview.naturalHeight);
+            offsetX = -(drawWidth - tempCanvas.width) / 2;
+            offsetY = 0;
+        } else {
+            drawWidth = tempCanvas.width;
+            drawHeight = imagePreview.naturalHeight * (drawWidth / imagePreview.naturalWidth);
+            offsetX = 0;
+            offsetY = -(drawHeight - tempCanvas.height) / 2;
+        }
+        
+        ctx.drawImage(imagePreview, offsetX, offsetY, drawWidth, drawHeight);
+        
+        // Get predictions
+        const predictions = await model.predict(tempCanvas);
+        displayPrediction(predictions);
+    } catch (error) {
+        console.error('Prediction error:', error);
+        resultDiv.textContent = 'Error during prediction. Please try again.';
+    }
+}
+
+async function startLivePrediction() { 
+    function loop() { 
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = 224;
+        tempCanvas.height = 224;
+        const ctx = tempCanvas.getContext('2d');
+        
+        // Mirror and draw the webcam frame
+        ctx.translate(tempCanvas.width, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(webcam, 0, 0, tempCanvas.width, tempCanvas.height);
+        
+        model.predict(tempCanvas).then(predictions => { 
+            displayPrediction(predictions); 
+        }).catch(error => {
+            console.error('Live prediction error:', error);
+        }); 
+        
+        animationId = requestAnimationFrame(loop); 
+    } 
+    loop(); 
+}
+
+function displayPrediction(predictions) { 
+    predictions.sort((a, b) => b.probability - a.probability); 
+    
+    // Clear previous results
+    resultDiv.innerHTML = '';
+    
+    // Display each prediction with a progress bar
+    predictions.forEach(p => {
+        const percentage = (p.probability * 100).toFixed(1);
+        const predictionElement = document.createElement('div');
+        predictionElement.innerHTML = `
+            <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                <span>${p.className}</span>
+                <span>${percentage}%</span>
+            </div>
+            <div class="progress-bar">
+                <div class="progress" style="width: ${percentage}%"></div>
+            </div>
+        `;
+        resultDiv.appendChild(predictionElement);
+    });
+}
+
+function stopWebcam() { 
+    if (webcamStream) { 
+        webcamStream.getTracks().forEach(track => track.stop()); 
+        webcamStream = null; 
+    } 
+    if (animationId) { 
+        cancelAnimationFrame(animationId); 
+        animationId = null; 
+    } 
+    webcam.style.display = 'none'; 
+    resultDiv.textContent = 'Results will appear here'; 
+}
+
+// Load model when page loads
+window.onload = loadModel;
+
+// Clean up when page is closed
+window.addEventListener('beforeunload', stopWebcam);
+</script>
+</body>
+</html><!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Live Mood Classifier</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.11.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+<style>
+body { font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; background: #f0f4f8; margin: 0; }
+.card { background: white; border-radius: 16px; box-shadow: 0 8px 20px rgba(0,0,0,0.08); padding: 20px; width: 90%; max-width: 400px; text-align: center; }
+button { background: linear-gradient(to right, #4facfe, #00f2fe); border: none; color: white; padding: 12px 20px; margin: 10px; border-radius: 8px; font-size: 16px; cursor: pointer; transition: transform 0.2s; }
+button:hover { transform: scale(1.05); }
+#result { margin-top: 20px; font-size: 18px; color: #333; min-height: 60px; }
+video, img { width: 100%; border-radius: 12px; margin-top: 15px; }
+.shimmer { height: 20px; background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 8px; margin: 8px 0; }
 .confidence-bar { height: 20px; background: #e0e0e0; border-radius: 10px; margin: 5px 0; overflow: hidden; }
 .confidence-fill { height: 100%; background: linear-gradient(to right, #4facfe, #00f2fe); border-radius: 10px; }
 @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
